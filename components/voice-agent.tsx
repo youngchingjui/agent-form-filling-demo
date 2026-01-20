@@ -46,7 +46,7 @@ export function VoiceAgent() {
   const dcRef = useRef<RTCDataChannel | null>(null)
   const remoteAudioRef = useRef<HTMLAudioElement | null>(null)
   const localStreamRef = useRef<MediaStream | null>(null)
-  
+
   const recognitionRef = useRef<SpeechRecognition | null>(null)
   const synthesisRef = useRef<SpeechSynthesisUtterance | null>(null)
   const messagesEndRef = useRef<HTMLDivElement>(null)
@@ -60,7 +60,7 @@ export function VoiceAgent() {
   // Initialize speech recognition
   const initSpeechRecognition = useCallback(() => {
     if (typeof window === 'undefined') return null
-    
+
     const SpeechRecognition = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition
     if (!SpeechRecognition) {
       setError('Speech recognition is not supported in your browser. Please use Chrome or Edge.')
@@ -182,10 +182,10 @@ export function VoiceAgent() {
         prev.map((msg) =>
           msg.id === processingId
             ? {
-                ...msg,
-                content: "I'm sorry, I encountered an error processing your request. Please try again.",
-                isProcessing: false,
-              }
+              ...msg,
+              content: "I'm sorry, I encountered an error processing your request. Please try again.",
+              isProcessing: false,
+            }
             : msg
         )
       )
@@ -198,7 +198,7 @@ export function VoiceAgent() {
     if (typeof window === 'undefined' || !(window as any).speechSynthesis) return
 
     setAgentState('speaking')
-    
+
     const utterance = new SpeechSynthesisUtterance(text)
     utterance.rate = 1.0
     utterance.pitch = 1.0
@@ -222,7 +222,7 @@ export function VoiceAgent() {
     }
 
     synthesisRef.current = utterance
-    ;(window as any).speechSynthesis.speak(utterance)
+      ; (window as any).speechSynthesis.speak(utterance)
   }
 
   // Toggle listening state (browser speech recognition + text model)
@@ -233,12 +233,12 @@ export function VoiceAgent() {
       setTranscript('')
     } else if (agentState === 'idle') {
       // Stop any ongoing speech
-      ;(window as any).speechSynthesis?.cancel()
-      
+      ; (window as any).speechSynthesis?.cancel()
+
       if (!recognitionRef.current) {
         recognitionRef.current = initSpeechRecognition() as any
       }
-      
+
       if (recognitionRef.current) {
         recognitionRef.current.start()
         setAgentState('listening')
@@ -311,7 +311,7 @@ export function VoiceAgent() {
       // Cleanup partially created objects
       try {
         pcRef.current?.close()
-      } catch {}
+      } catch { }
       pcRef.current = null
       setIsRealtimeConnected(false)
     } finally {
@@ -322,8 +322,8 @@ export function VoiceAgent() {
   // Cleanup on unmount
   useEffect(() => {
     return () => {
-      try { pcRef.current?.close() } catch {}
-      try { localStreamRef.current?.getTracks().forEach(t => t.stop()) } catch {}
+      try { pcRef.current?.close() } catch { }
+      try { localStreamRef.current?.getTracks().forEach(t => t.stop()) } catch { }
       pcRef.current = null
       localStreamRef.current = null
     }
@@ -332,7 +332,7 @@ export function VoiceAgent() {
   // Toggle audio output
   const toggleAudio = () => {
     if (agentState === 'speaking') {
-      ;(window as any).speechSynthesis?.cancel()
+      ; (window as any).speechSynthesis?.cancel()
       setAgentState('idle')
     }
     setIsAudioEnabled(!isAudioEnabled)
@@ -547,12 +547,12 @@ export function VoiceAgent() {
               {isRealtimeConnected
                 ? 'Realtime voice is active via WebRTC'
                 : agentState === 'listening'
-                ? 'Click to stop'
-                : agentState === 'processing'
-                ? 'Processing your request...'
-                : agentState === 'speaking'
-                ? 'Speaking...'
-                : 'Click to start speaking'}
+                  ? 'Click to stop'
+                  : agentState === 'processing'
+                    ? 'Processing your request...'
+                    : agentState === 'speaking'
+                      ? 'Speaking...'
+                      : 'Click to start speaking'}
             </p>
           </div>
         ) : (
