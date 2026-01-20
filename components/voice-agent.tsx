@@ -7,7 +7,7 @@ import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
 import { ScrollArea } from '@/components/ui/scroll-area'
-import { Mic, MicOff, Volume2, VolumeX, Loader2, Bot, User, Sparkles, Send, Keyboard } from 'lucide-react'
+import { Mic, MicOff, Volume2, VolumeX, Loader2, Bot, User, Sparkles, Send, Keyboard, PlugZap } from 'lucide-react'
 import { Input } from '@/components/ui/input'
 import { useFormStore } from '@/lib/form-store'
 import { cn } from '@/lib/utils'
@@ -38,6 +38,14 @@ export function VoiceAgent() {
   const [error, setError] = useState<string | null>(null)
   const [textInput, setTextInput] = useState('')
   const [inputMode, setInputMode] = useState<'voice' | 'text'>('voice')
+
+  // Realtime API connection state
+  const [isRealtimeConnected, setIsRealtimeConnected] = useState(false)
+  const [isConnectingRealtime, setIsConnectingRealtime] = useState(false)
+  const pcRef = useRef<RTCPeerConnection | null>(null)
+  const dcRef = useRef<RTCDataChannel | null>(null)
+  const remoteAudioRef = useRef<HTMLAudioElement | null>(null)
+  const localStreamRef = useRef<MediaStream | null>(null)
   
   const recognitionRef = useRef<SpeechRecognition | null>(null)
   const synthesisRef = useRef<SpeechSynthesisUtterance | null>(null)
@@ -53,7 +61,7 @@ export function VoiceAgent() {
   const initSpeechRecognition = useCallback(() => {
     if (typeof window === 'undefined') return null
     
-    const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition
+    const SpeechRecognition = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition
     if (!SpeechRecognition) {
       setError('Speech recognition is not supported in your browser. Please use Chrome or Edge.')
       return null
@@ -64,7 +72,7 @@ export function VoiceAgent() {
     recognition.interimResults = true
     recognition.lang = 'en-US'
 
-    recognition.onresult = (event) => {
+    recognition.onresult = (event: any) => {
       let finalTranscript = ''
       let interimTranscript = ''
 
@@ -85,7 +93,7 @@ export function VoiceAgent() {
       }
     }
 
-    recognition.onerror = (event) => {
+    recognition.onerror = (event: any) => {
       console.error('Speech recognition error:', event.error)
       if (event.error !== 'no-speech') {
         setError(`Speech recognition error: ${event.error}`)
@@ -187,7 +195,7 @@ export function VoiceAgent() {
 
   // Speak the response using TTS
   const speakResponse = (text: string) => {
-    if (typeof window === 'undefined' || !window.speechSynthesis) return
+    if (typeof window === 'undefined' || !(window as any).speechSynthesis) return
 
     setAgentState('speaking')
     
@@ -197,9 +205,9 @@ export function VoiceAgent() {
     utterance.volume = 1.0
 
     // Try to use a natural-sounding voice
-    const voices = window.speechSynthesis.getVoices()
+    const voices = (window as any).speechSynthesis.getVoices()
     const preferredVoice = voices.find(
-      (v) => v.name.includes('Samantha') || v.name.includes('Google') || v.name.includes('Natural')
+      (v: SpeechSynthesisVoice) => v.name.includes('Samantha') || v.name.includes('Google') || v.name.includes('Natural')
     )
     if (preferredVoice) {
       utterance.voice = preferredVoice
@@ -214,10 +222,10 @@ export function VoiceAgent() {
     }
 
     synthesisRef.current = utterance
-    window.speechSynthesis.speak(utterance)
+    ;(window as any).speechSynthesis.speak(utterance)
   }
 
-  // Toggle listening state
+  // Toggle listening state (browser speech recognition + text model)
   const toggleListening = () => {
     if (agentState === 'listening') {
       recognitionRef.current?.stop()
@@ -225,10 +233,10 @@ export function VoiceAgent() {
       setTranscript('')
     } else if (agentState === 'idle') {
       // Stop any ongoing speech
-      window.speechSynthesis?.cancel()
+      ;(window as any).speechSynthesis?.cancel()
       
       if (!recognitionRef.current) {
-        recognitionRef.current = initSpeechRecognition()
+        recognitionRef.current = initSpeechRecognition() as any
       }
       
       if (recognitionRef.current) {
@@ -239,10 +247,92 @@ export function VoiceAgent() {
     }
   }
 
+  // Realtime API: Connect via WebRTC without Agents SDK
+  const connectRealtime = useCallback(async () => {
+    if (isRealtimeConnected || isConnectingRealtime) return
+
+    try {
+      setIsConnectingRealtime(true)
+      setError(null)
+
+      const pc = new RTCPeerConnection()
+      pcRef.current = pc
+
+      // Create or reuse a hidden audio element to play remote audio
+      if (!remoteAudioRef.current) {
+        const el = document.createElement('audio')
+        el.autoplay = true
+        el.style.display = 'none'
+        document.body.appendChild(el)
+        remoteAudioRef.current = el
+      }
+
+      pc.ontrack = (e) => {
+        if (remoteAudioRef.current) {
+          remoteAudioRef.current.srcObject = e.streams[0]
+        }
+      }
+
+      // Capture microphone
+      const ms = await navigator.mediaDevices.getUserMedia({ audio: true })
+      localStreamRef.current = ms
+      const [track] = ms.getAudioTracks()
+      pc.addTrack(track, ms)
+
+      // Data channel for events (optional)
+      const dc = pc.createDataChannel('oai-events')
+      dcRef.current = dc
+      dc.onmessage = (ev) => {
+        // For now, just log messages from the model
+        console.debug('Realtime message:', ev.data)
+      }
+
+      const offer = await pc.createOffer()
+      await pc.setLocalDescription(offer)
+
+      const res = await fetch('/api/realtime/session', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/sdp' },
+        body: offer.sdp || '',
+      })
+
+      if (!res.ok) {
+        const t = await res.text()
+        throw new Error(t || 'Failed to create realtime session')
+      }
+
+      const answerSdp = await res.text()
+      await pc.setRemoteDescription({ type: 'answer', sdp: answerSdp })
+
+      setIsRealtimeConnected(true)
+    } catch (e: any) {
+      console.error('Realtime connection error:', e)
+      setError(e?.message || 'Failed to connect to realtime API')
+      // Cleanup partially created objects
+      try {
+        pcRef.current?.close()
+      } catch {}
+      pcRef.current = null
+      setIsRealtimeConnected(false)
+    } finally {
+      setIsConnectingRealtime(false)
+    }
+  }, [isRealtimeConnected, isConnectingRealtime])
+
+  // Cleanup on unmount
+  useEffect(() => {
+    return () => {
+      try { pcRef.current?.close() } catch {}
+      try { localStreamRef.current?.getTracks().forEach(t => t.stop()) } catch {}
+      pcRef.current = null
+      localStreamRef.current = null
+    }
+  }, [])
+
   // Toggle audio output
   const toggleAudio = () => {
     if (agentState === 'speaking') {
-      window.speechSynthesis?.cancel()
+      ;(window as any).speechSynthesis?.cancel()
       setAgentState('idle')
     }
     setIsAudioEnabled(!isAudioEnabled)
@@ -308,6 +398,21 @@ export function VoiceAgent() {
             Voice Assistant
           </CardTitle>
           <div className="flex items-center gap-2">
+            {isRealtimeConnected ? (
+              <Badge variant="default" className="bg-green-600 text-white">Realtime Connected</Badge>
+            ) : (
+              <Button
+                variant="secondary"
+                size="sm"
+                className="gap-1"
+                onClick={connectRealtime}
+                disabled={isConnectingRealtime}
+                title="Connect to OpenAI Realtime API (WebRTC)"
+              >
+                <PlugZap className="h-4 w-4" />
+                {isConnectingRealtime ? 'Connecting...' : 'Connect Realtime'}
+              </Button>
+            )}
             <Badge variant="outline" className={cn(
               'transition-colors',
               agentState === 'listening' && 'border-red-500 text-red-500',
@@ -346,6 +451,9 @@ export function VoiceAgent() {
       </CardHeader>
 
       <CardContent className="flex flex-1 flex-col gap-4 p-4">
+        {/* Hidden audio element for remote stream */}
+        <audio ref={remoteAudioRef} autoPlay className="hidden" />
+
         {/* Messages Area */}
         <ScrollArea className="flex-1 pr-4">
           <div className="space-y-4">
@@ -423,19 +531,22 @@ export function VoiceAgent() {
               )}
               <Button
                 onClick={toggleListening}
-                disabled={agentState === 'processing' || agentState === 'speaking'}
+                disabled={agentState === 'processing' || agentState === 'speaking' || isRealtimeConnected}
                 size="lg"
                 className={cn(
                   'relative h-16 w-16 rounded-full transition-all',
                   agentState === 'listening' && 'bg-red-500 hover:bg-red-600',
                   agentState === 'idle' && 'bg-primary hover:bg-primary/90'
                 )}
+                title={isRealtimeConnected ? 'Realtime is handling audio' : 'Use browser mic + text agent'}
               >
                 {stateDisplay.icon}
               </Button>
             </div>
             <p className="text-sm text-muted-foreground">
-              {agentState === 'listening'
+              {isRealtimeConnected
+                ? 'Realtime voice is active via WebRTC'
+                : agentState === 'listening'
                 ? 'Click to stop'
                 : agentState === 'processing'
                 ? 'Processing your request...'
@@ -466,3 +577,4 @@ export function VoiceAgent() {
     </Card>
   )
 }
+
