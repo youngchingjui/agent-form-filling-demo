@@ -1,7 +1,5 @@
 # Agent Tool Calls
 
-Non-obvious rules for how the agent edits the form while talking to the user.
-
 ## Goals
 
 - Let the agent fill the form accurately from natural conversation.
