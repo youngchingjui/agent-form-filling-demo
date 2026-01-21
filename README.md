@@ -1,6 +1,6 @@
 # Agent assisted form filling
 
-*Automatically synced with your [v0.app](https://v0.app) deployments*
+_Automatically synced with your [v0.app](https://v0.app) deployments_
 
 [![Deployed on Vercel](https://img.shields.io/badge/Deployed%20on-Vercel-black?style=for-the-badge&logo=vercel)](https://vercel.com/youngchingjuis-projects/v0-agent-assisted-form-filling)
 [![Built with v0](https://img.shields.io/badge/Built%20with-v0.app-black?style=for-the-badge)](https://v0.app/chat/icy0pVU9MiR)
@@ -44,10 +44,9 @@ Create `.env.local` and set:
 
 - `OPENAI_API_KEY` – your OpenAI API key
 - Optional: `OPENAI_REALTIME_MODEL` (defaults to `gpt-realtime`)
-- Optional: `OPENAI_REALTIME_VOICE` (defaults to `marin`)
+- Optional: `OPENAI_REALTIME_VOICE` (defaults to `coral`)
 
 ### Notes
 
 - Autoplay of audio generally requires a user gesture; click the microphone button to start the call.
 - The text-based reasoning agent remains available when you switch the input mode to "text". While a realtime call is active, interim speech transcripts are displayed in the assistant panel.
-

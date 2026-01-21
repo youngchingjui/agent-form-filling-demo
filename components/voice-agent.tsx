@@ -280,9 +280,17 @@ export function VoiceAgent() {
       const offer = await pc.createOffer()
       await pc.setLocalDescription(offer)
 
+      // Detect browser language
+      const browserLanguage = navigator.language || navigator.languages?.[0] || 'en'
+      // Extract language code (e.g., 'en-US' -> 'en')
+      const languageCode = browserLanguage.split('-')[0]
+
       const res = await fetch('/api/realtime/session', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/sdp' },
+        headers: { 
+          'Content-Type': 'application/sdp',
+          'X-User-Language': languageCode,
+        },
         body: offer.sdp || '',
       })
 

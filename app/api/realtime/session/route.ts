@@ -10,13 +10,23 @@ export async function POST(req: Request) {
       return new Response('Missing SDP in request body', { status: 400 })
     }
 
+    // Get user's language from header
+    const userLanguage = req.headers.get('X-User-Language') || 'en'
+
     const model = process.env.OPENAI_REALTIME_MODEL || 'gpt-realtime'
-    const voice = process.env.OPENAI_REALTIME_VOICE || 'marin'
+    const voice = process.env.OPENAI_REALTIME_VOICE || 'coral'
 
     const sessionConfig = JSON.stringify({
       type: 'realtime',
       model,
       audio: { output: { voice } },
+      instructions: `You are a helpful AI assistant specializing in product certification. 
+        
+CRITICAL LANGUAGE RULE: The user's browser detected language is "${userLanguage}". You MUST respond in ${userLanguage} at all times. 
+- If the user speaks in ${userLanguage}, respond in ${userLanguage}.
+- If the user switches to another language, respond in that same language.
+- NEVER respond in a different language than what the user is currently speaking.
+- Always match the user's language exactly.`,
     })
 
     const fd = new FormData()
@@ -47,4 +57,3 @@ export async function POST(req: Request) {
     return new Response('Failed to create realtime session', { status: 500 })
   }
 }
-
