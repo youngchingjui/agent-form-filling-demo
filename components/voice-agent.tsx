@@ -7,11 +7,10 @@ import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
 import { ScrollArea } from '@/components/ui/scroll-area'
-import { Mic, MicOff, Volume2, VolumeX, Loader2, Bot, User, Sparkles, Send, Keyboard, PlugZap } from 'lucide-react'
+import { Mic, MicOff, Volume2, VolumeX, Loader2, Bot, User, Sparkles, Send, Keyboard } from 'lucide-react'
 import { Input } from '@/components/ui/input'
 import { useFormStore } from '@/lib/form-store'
 import { cn } from '@/lib/utils'
-import SpeechRecognition from 'speech-recognition'
 
 interface Message {
   id: string
@@ -29,7 +28,7 @@ export function VoiceAgent() {
     {
       id: '1',
       role: 'assistant',
-      content: "Hello! I'm your certification assistant. I can help you fill out the product certification form. Just click the microphone and tell me about your product, company, or ask any questions about the certification process.",
+      content: "Hello! I'm your certification assistant. I can help you fill out the product certification form. Click the microphone to start a realtime voice call, or type your question.",
       timestamp: new Date(),
     },
   ])
@@ -47,70 +46,21 @@ export function VoiceAgent() {
   const remoteAudioRef = useRef<HTMLAudioElement | null>(null)
   const localStreamRef = useRef<MediaStream | null>(null)
 
-  const recognitionRef = useRef<SpeechRecognition | null>(null)
   const synthesisRef = useRef<SpeechSynthesisUtterance | null>(null)
   const messagesEndRef = useRef<HTMLDivElement>(null)
   const { formData, setFormData } = useFormStore()
+
+  // Accumulators for realtime text output
+  const responseBufferRef = useRef<Map<string, string>>(new Map())
+  const utteringResponseRef = useRef<string | null>(null)
+  const latestUserTranscriptRef = useRef<string>('')
 
   // Scroll to bottom when messages change
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' })
   }, [messages])
 
-  // Initialize speech recognition
-  const initSpeechRecognition = useCallback(() => {
-    if (typeof window === 'undefined') return null
-
-    const SpeechRecognition = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition
-    if (!SpeechRecognition) {
-      setError('Speech recognition is not supported in your browser. Please use Chrome or Edge.')
-      return null
-    }
-
-    const recognition = new SpeechRecognition()
-    recognition.continuous = true
-    recognition.interimResults = true
-    recognition.lang = 'en-US'
-
-    recognition.onresult = (event: any) => {
-      let finalTranscript = ''
-      let interimTranscript = ''
-
-      for (let i = event.resultIndex; i < event.results.length; i++) {
-        const transcript = event.results[i][0].transcript
-        if (event.results[i].isFinal) {
-          finalTranscript += transcript
-        } else {
-          interimTranscript += transcript
-        }
-      }
-
-      if (finalTranscript) {
-        setTranscript('')
-        handleUserMessage(finalTranscript)
-      } else {
-        setTranscript(interimTranscript)
-      }
-    }
-
-    recognition.onerror = (event: any) => {
-      console.error('Speech recognition error:', event.error)
-      if (event.error !== 'no-speech') {
-        setError(`Speech recognition error: ${event.error}`)
-      }
-      setAgentState('idle')
-    }
-
-    recognition.onend = () => {
-      if (agentState === 'listening') {
-        setAgentState('idle')
-      }
-    }
-
-    return recognition
-  }, [agentState])
-
-  // Handle user message - send to reasoning agent
+  // Handle user message - send to reasoning agent (typed input path)
   const handleUserMessage = async (content: string) => {
     const userMessage: Message = {
       id: Date.now().toString(),
@@ -170,8 +120,8 @@ export function VoiceAgent() {
         )
       )
 
-      // Speak the response if audio is enabled
-      if (isAudioEnabled && data.response) {
+      // Speak the response if audio is enabled and we're NOT in realtime mode
+      if (isAudioEnabled && data.response && !isRealtimeConnected) {
         speakResponse(data.response)
       } else {
         setAgentState('idle')
@@ -193,7 +143,7 @@ export function VoiceAgent() {
     }
   }
 
-  // Speak the response using TTS
+  // Speak the response using browser TTS (non-realtime typed path)
   const speakResponse = (text: string) => {
     if (typeof window === 'undefined' || !(window as any).speechSynthesis) return
 
@@ -222,32 +172,75 @@ export function VoiceAgent() {
     }
 
     synthesisRef.current = utterance
-      ; (window as any).speechSynthesis.speak(utterance)
+    ;(window as any).speechSynthesis.speak(utterance)
   }
 
-  // Toggle listening state (browser speech recognition + text model)
-  const toggleListening = () => {
-    if (agentState === 'listening') {
-      recognitionRef.current?.stop()
-      setAgentState('idle')
-      setTranscript('')
-    } else if (agentState === 'idle') {
-      // Stop any ongoing speech
-      ; (window as any).speechSynthesis?.cancel()
+  // Parse events from the Realtime data channel and surface transcripts + responses
+  const handleRealtimeEvent = useCallback((raw: string) => {
+    try {
+      const evt = JSON.parse(raw)
+      const type: string = evt?.type || ''
 
-      if (!recognitionRef.current) {
-        recognitionRef.current = initSpeechRecognition() as any
+      // Heuristic: detect when the model thinks / processes
+      if (type.includes('response') && type.includes('started')) {
+        setAgentState('processing')
+        // Create a placeholder assistant message
+        const id = evt?.response?.id || evt?.id || String(Date.now())
+        responseBufferRef.current.set(id, '')
+        setMessages(prev => [...prev, { id, role: 'assistant', content: '', timestamp: new Date(), isProcessing: true }])
       }
 
-      if (recognitionRef.current) {
-        recognitionRef.current.start()
+      // Streamed assistant text
+      if (type.includes('response.output_text.delta') && typeof evt?.delta === 'string') {
+        const id: string = evt?.response?.id || evt?.id || 'default'
+        const prev = responseBufferRef.current.get(id) || ''
+        const next = prev + evt.delta
+        responseBufferRef.current.set(id, next)
+        setMessages(prev => prev.map(m => m.id === id ? { ...m, content: next } : m))
+      }
+
+      // Assistant text done
+      if (type.includes('response.completed')) {
+        const id: string = evt?.response?.id || evt?.id || 'default'
+        const finalText = responseBufferRef.current.get(id) || ''
+        setMessages(prev => prev.map(m => m.id === id ? { ...m, content: finalText, isProcessing: false } : m))
+        responseBufferRef.current.delete(id)
+        setAgentState('idle')
+      }
+
+      // User transcript (partial)
+      if ((type.includes('transcript.delta') || type.includes('input_audio_transcription.delta')) && typeof evt?.delta === 'string') {
+        setTranscript(prev => (prev + evt.delta).slice(-4000))
+        latestUserTranscriptRef.current = (latestUserTranscriptRef.current + evt.delta).slice(-4000)
         setAgentState('listening')
-        setError(null)
       }
-    }
-  }
 
-  // Realtime API: Connect via WebRTC without Agents SDK
+      // User transcript completed
+      if ((type.includes('transcript.completed') || type.includes('input_audio_transcription.completed'))) {
+        const text: string = evt?.transcript || latestUserTranscriptRef.current
+        if (text) {
+          const userMsg: Message = { id: String(Date.now()), role: 'user', content: text, timestamp: new Date() }
+          setMessages(prev => [...prev, userMsg])
+        }
+        latestUserTranscriptRef.current = ''
+        setTranscript('')
+        // After user finishes talking, model may respond; keep state as processing/listening handled above
+      }
+
+      // Optional: detect VAD events to update UI
+      if (type.includes('input_audio_buffer.speech_started')) {
+        setAgentState('listening')
+      }
+      if (type.includes('input_audio_buffer.speech_stopped')) {
+        // Transition handled when response arrives
+      }
+    } catch (err) {
+      // Some messages might be non-JSON; ignore gracefully
+      // console.debug('Non-JSON realtime message', raw)
+    }
+  }, [setMessages])
+
+  // Realtime API: Connect via WebRTC (no Agents SDK)
   const connectRealtime = useCallback(async () => {
     if (isRealtimeConnected || isConnectingRealtime) return
 
@@ -279,13 +272,10 @@ export function VoiceAgent() {
       const [track] = ms.getAudioTracks()
       pc.addTrack(track, ms)
 
-      // Data channel for events (optional)
+      // Data channel for events
       const dc = pc.createDataChannel('oai-events')
       dcRef.current = dc
-      dc.onmessage = (ev) => {
-        // For now, just log messages from the model
-        console.debug('Realtime message:', ev.data)
-      }
+      dc.onmessage = (ev) => handleRealtimeEvent(ev.data)
 
       const offer = await pc.createOffer()
       await pc.setLocalDescription(offer)
@@ -305,19 +295,31 @@ export function VoiceAgent() {
       await pc.setRemoteDescription({ type: 'answer', sdp: answerSdp })
 
       setIsRealtimeConnected(true)
+      setAgentState('idle')
     } catch (e: any) {
       console.error('Realtime connection error:', e)
       setError(e?.message || 'Failed to connect to realtime API')
       // Cleanup partially created objects
-      try {
-        pcRef.current?.close()
-      } catch { }
+      try { pcRef.current?.close() } catch { }
       pcRef.current = null
       setIsRealtimeConnected(false)
+      setAgentState('error')
     } finally {
       setIsConnectingRealtime(false)
     }
-  }, [isRealtimeConnected, isConnectingRealtime])
+  }, [isRealtimeConnected, isConnectingRealtime, handleRealtimeEvent])
+
+  // Disconnect realtime session
+  const disconnectRealtime = useCallback(() => {
+    try { pcRef.current?.close() } catch { }
+    try { localStreamRef.current?.getTracks().forEach(t => t.stop()) } catch { }
+    pcRef.current = null
+    localStreamRef.current = null
+    dcRef.current = null
+    setIsRealtimeConnected(false)
+    setTranscript('')
+    setAgentState('idle')
+  }, [])
 
   // Cleanup on unmount
   useEffect(() => {
@@ -329,10 +331,10 @@ export function VoiceAgent() {
     }
   }, [])
 
-  // Toggle audio output
+  // Toggle audio output for browser TTS (does not affect realtime remote audio)
   const toggleAudio = () => {
     if (agentState === 'speaking') {
-      ; (window as any).speechSynthesis?.cancel()
+      ;(window as any).speechSynthesis?.cancel()
       setAgentState('idle')
     }
     setIsAudioEnabled(!isAudioEnabled)
@@ -346,28 +348,32 @@ export function VoiceAgent() {
     setTextInput('')
   }
 
+  // The mic button now starts/stops the realtime call
+  const onMicClick = () => {
+    if (isRealtimeConnected) {
+      disconnectRealtime()
+    } else if (!isConnectingRealtime) {
+      connectRealtime()
+    }
+  }
+
   // Get state-specific styles and content
   const getStateDisplay = () => {
+    if (isRealtimeConnected) {
+      return {
+        color: 'bg-green-600',
+        pulseColor: 'bg-green-500',
+        text: agentState === 'listening' ? 'Listening…' : agentState === 'processing' ? 'Thinking…' : 'Connected',
+        icon: <Mic className="h-6 w-6 text-white" />,
+      }
+    }
+
     switch (agentState) {
-      case 'listening':
-        return {
-          color: 'bg-red-500',
-          pulseColor: 'bg-red-400',
-          text: 'Listening...',
-          icon: <Mic className="h-6 w-6 text-white" />,
-        }
-      case 'processing':
-        return {
-          color: 'bg-primary',
-          pulseColor: 'bg-primary/70',
-          text: 'Thinking...',
-          icon: <Loader2 className="h-6 w-6 text-white animate-spin" />,
-        }
       case 'speaking':
         return {
           color: 'bg-accent',
           pulseColor: 'bg-accent/70',
-          text: 'Speaking...',
+          text: 'Speaking…',
           icon: <Volume2 className="h-6 w-6 text-white" />,
         }
       case 'error':
@@ -398,34 +404,19 @@ export function VoiceAgent() {
             Voice Assistant
           </CardTitle>
           <div className="flex items-center gap-2">
-            {isRealtimeConnected ? (
-              <Badge variant="default" className="bg-green-600 text-white">Realtime Connected</Badge>
-            ) : (
-              <Button
-                variant="secondary"
-                size="sm"
-                className="gap-1"
-                onClick={connectRealtime}
-                disabled={isConnectingRealtime}
-                title="Connect to OpenAI Realtime API (WebRTC)"
-              >
-                <PlugZap className="h-4 w-4" />
-                {isConnectingRealtime ? 'Connecting...' : 'Connect Realtime'}
-              </Button>
-            )}
             <Badge variant="outline" className={cn(
               'transition-colors',
-              agentState === 'listening' && 'border-red-500 text-red-500',
-              agentState === 'processing' && 'border-primary text-primary',
-              agentState === 'speaking' && 'border-accent text-accent',
+              isRealtimeConnected && 'border-green-600 text-green-600',
+              !isRealtimeConnected && agentState === 'speaking' && 'border-accent text-accent',
             )}>
-              {stateDisplay.text}
+              {isRealtimeConnected ? 'Realtime Connected' : stateDisplay.text}
             </Badge>
             <Button
               variant="ghost"
               size="icon"
               onClick={toggleAudio}
               className="h-8 w-8"
+              title="Toggle browser TTS for typed replies"
             >
               {isAudioEnabled ? (
                 <Volume2 className="h-4 w-4" />
@@ -502,7 +493,7 @@ export function VoiceAgent() {
           </div>
         </ScrollArea>
 
-        {/* Transcript Preview */}
+        {/* Transcript Preview (interim from realtime) */}
         {transcript && (
           <div className="rounded-lg border border-dashed p-3">
             <p className="text-sm text-muted-foreground italic">{transcript}</p>
@@ -521,7 +512,7 @@ export function VoiceAgent() {
           <div className="flex flex-col items-center gap-3 pt-2">
             <div className="relative">
               {/* Pulse animation */}
-              {(agentState === 'listening' || agentState === 'speaking') && (
+              {isRealtimeConnected && (agentState === 'listening' || agentState === 'processing') && (
                 <div
                   className={cn(
                     'absolute inset-0 rounded-full animate-ping opacity-75',
@@ -530,29 +521,28 @@ export function VoiceAgent() {
                 />
               )}
               <Button
-                onClick={toggleListening}
-                disabled={agentState === 'processing' || agentState === 'speaking' || isRealtimeConnected}
+                onClick={onMicClick}
+                disabled={isConnectingRealtime}
                 size="lg"
                 className={cn(
                   'relative h-16 w-16 rounded-full transition-all',
-                  agentState === 'listening' && 'bg-red-500 hover:bg-red-600',
-                  agentState === 'idle' && 'bg-primary hover:bg-primary/90'
+                  isRealtimeConnected ? 'bg-green-600 hover:bg-green-700' : 'bg-primary hover:bg-primary/90'
                 )}
-                title={isRealtimeConnected ? 'Realtime is handling audio' : 'Use browser mic + text agent'}
+                title={isRealtimeConnected ? 'Click to end voice call' : 'Click to start voice call'}
               >
-                {stateDisplay.icon}
+                {isRealtimeConnected ? <Mic className="h-6 w-6 text-white" /> : stateDisplay.icon}
               </Button>
             </div>
             <p className="text-sm text-muted-foreground">
               {isRealtimeConnected
-                ? 'Realtime voice is active via WebRTC'
-                : agentState === 'listening'
-                  ? 'Click to stop'
+                ? agentState === 'listening'
+                  ? 'Listening…'
                   : agentState === 'processing'
-                    ? 'Processing your request...'
-                    : agentState === 'speaking'
-                      ? 'Speaking...'
-                      : 'Click to start speaking'}
+                    ? 'Processing…'
+                    : 'Connected — click to hang up'
+                : isConnectingRealtime
+                  ? 'Connecting to realtime…'
+                  : 'Click the mic to start a realtime voice call'}
             </p>
           </div>
         ) : (
