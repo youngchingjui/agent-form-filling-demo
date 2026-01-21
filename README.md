@@ -1,6 +1,6 @@
 # Agent assisted form filling
 
-*Automatically synced with your [v0.app](https://v0.app) deployments*
+_Automatically synced with your [v0.app](https://v0.app) deployments_
 
 [![Deployed on Vercel](https://img.shields.io/badge/Deployed%20on-Vercel-black?style=for-the-badge&logo=vercel)](https://vercel.com/youngchingjuis-projects/v0-agent-assisted-form-filling)
 [![Built with v0](https://img.shields.io/badge/Built%20with-v0.app-black?style=for-the-badge)](https://v0.app/chat/icy0pVU9MiR)
@@ -31,12 +31,12 @@ Continue building your app on:
 
 ---
 
-## Realtime API (WebRTC) without the Agents SDK
+## Realtime voice (WebRTC) — no OpenAI Agents SDK
 
-This project now includes a direct connection to OpenAI's Realtime REST endpoints over WebRTC, avoiding the Agents SDK.
+The app connects directly to OpenAI's Realtime REST endpoints over WebRTC; the OpenAI Agents SDK is not used.
 
 - Server route: `app/api/realtime/session/route.ts` – accepts an SDP offer and forwards it to OpenAI's Realtime API, returning the SDP answer.
-- Client: the Voice Assistant UI exposes a "Connect Realtime" button that negotiates a WebRTC session, streams your microphone, and plays the model's audio response.
+- Client: click the microphone button in the Voice Assistant to start a realtime voice call. Your microphone audio is streamed to the model and the model's voice is played back.
 
 ### Environment variables
 
@@ -44,10 +44,9 @@ Create `.env.local` and set:
 
 - `OPENAI_API_KEY` – your OpenAI API key
 - Optional: `OPENAI_REALTIME_MODEL` (defaults to `gpt-realtime`)
-- Optional: `OPENAI_REALTIME_VOICE` (defaults to `marin`)
+- Optional: `OPENAI_REALTIME_VOICE` (defaults to `coral`)
 
 ### Notes
 
-- Autoplay of audio generally requires a user gesture; click the "Connect Realtime" button to start.
-- The existing text-based reasoning agent remains available. When Realtime is connected, the browser STT mic button is disabled to avoid double-capturing audio.
-
+- Autoplay of audio generally requires a user gesture; click the microphone button to start the call.
+- The text-based reasoning agent remains available when you switch the input mode to "text". While a realtime call is active, interim speech transcripts are displayed in the assistant panel.
