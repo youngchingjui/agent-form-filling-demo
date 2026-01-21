@@ -11,13 +11,15 @@ import { Mic, MicOff, Volume2, VolumeX, Loader2, Bot, User, Sparkles, Send, Keyb
 import { Input } from '@/components/ui/input'
 import { useFormStore } from '@/lib/form-store'
 import { cn } from '@/lib/utils'
+import { certificationFormSchema, type CertificationFormData } from '@/lib/certification-form'
 
 interface Message {
   id: string
-  role: 'user' | 'assistant' | 'system'
+  role: 'user' | 'assistant' | 'system' | 'tool'
   content: string
   timestamp: Date
   isProcessing?: boolean
+  source?: 'voice' | 'text'
 }
 
 type AgentState = 'idle' | 'listening' | 'processing' | 'speaking' | 'error'
@@ -55,10 +57,38 @@ export function VoiceAgent() {
   const utteringResponseRef = useRef<string | null>(null)
   const latestUserTranscriptRef = useRef<string>('')
 
+  // Keep a live snapshot of form data for tools
+  const formSnapshotRef = useRef<Partial<CertificationFormData>>({})
+  useEffect(() => {
+    formSnapshotRef.current = formData
+  }, [formData])
+
   // Scroll to bottom when messages change
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' })
   }, [messages])
+
+  // Helper: send an event over the Realtime data channel
+  const sendRealtimeEvent = useCallback((event: unknown) => {
+    const dc = dcRef.current
+    if (dc && dc.readyState === 'open') {
+      dc.send(JSON.stringify(event))
+    }
+  }, [])
+
+  // Send function call output back to the model
+  const sendToolResult = useCallback((callId: string, result: unknown) => {
+    sendRealtimeEvent({
+      type: 'conversation.item.create',
+      item: {
+        type: 'function_call_output',
+        call_id: callId,
+        output: JSON.stringify(result ?? {})
+      }
+    })
+    // Ask the model to continue now that tool results are available
+    sendRealtimeEvent({ type: 'response.create' })
+  }, [sendRealtimeEvent])
 
   // Handle user message - send to reasoning agent (typed input path)
   const handleUserMessage = async (content: string) => {
@@ -67,6 +97,7 @@ export function VoiceAgent() {
       role: 'user',
       content,
       timestamp: new Date(),
+      source: 'text',
     }
 
     setMessages((prev) => [...prev, userMessage])
@@ -94,7 +125,7 @@ export function VoiceAgent() {
           message: content,
           currentFormData: formData,
           conversationHistory: messages.slice(-10).map(m => ({
-            role: m.role,
+            role: m.role === 'tool' ? 'assistant' : m.role, // collapse tools into assistant for text path
             content: m.content,
           })),
         }),
@@ -109,6 +140,18 @@ export function VoiceAgent() {
       // Update form data if the agent extracted information
       if (data.formUpdates && Object.keys(data.formUpdates).length > 0) {
         setFormData(data.formUpdates)
+        // Transcript: add a tool summary entry (no raw values)
+        const updatedFields = Object.keys(data.formUpdates)
+        setMessages(prev => [
+          ...prev,
+          {
+            id: `${processingId}-tools`,
+            role: 'tool',
+            content: `Updated fields: ${updatedFields.join(', ')}`,
+            timestamp: new Date(),
+            source: 'text',
+          }
+        ])
       }
 
       // Update the processing message with the actual response
@@ -175,70 +218,153 @@ export function VoiceAgent() {
     ;(window as any).speechSynthesis.speak(utterance)
   }
 
+  // Execute a tool that the model called during realtime
+  const executeToolCall = useCallback(async (toolName: string, args: any) => {
+    try {
+      if (toolName === 'get_latest_form_data') {
+        return { data: formSnapshotRef.current }
+      }
+      if (toolName === 'get_form_schema') {
+        const fields: string[] | undefined = Array.isArray(args?.fields) ? args.fields : undefined
+        // Build a lightweight schema description (types/enums only) to help the model validate
+        const shape: Record<string, any> = (certificationFormSchema as any).shape || {}
+        const toDesc = (key: string, zodNode: any): any => {
+          const def = zodNode?._def || {}
+          const typeName = def.typeName || (zodNode?._def?.innerType?._def?.typeName ?? 'unknown')
+          if (typeName === 'ZodEnum') {
+            return { type: 'enum', values: def.values || def._def?.values }
+          }
+          if (typeName === 'ZodArray' && def.type?._def?.typeName === 'ZodEnum') {
+            return { type: 'array<enum>', values: def.type?._def?.values }
+          }
+          if (typeName === 'ZodBoolean') return { type: 'boolean' }
+          if (typeName === 'ZodString') return { type: 'string' }
+          return { type: 'unknown' }
+        }
+        const entries = Object.entries(shape)
+          .filter(([k]) => !fields || fields.includes(k))
+          .map(([k, v]) => [k, toDesc(k, v)])
+        return { schema: Object.fromEntries(entries) }
+      }
+      if (toolName === 'update_form_field') {
+        const field = String(args?.field || '')
+        const value = args?.value
+        const shape: Record<string, any> = (certificationFormSchema as any).shape || {}
+        if (!(field in shape)) {
+          return { success: false, error: `Unknown field: ${field}` }
+        }
+        // Normalize arrays for multi-select fields
+        const arrayFields = new Set(['certificationTypes', 'targetMarkets'])
+        let normalizedValue: any = value
+        if (arrayFields.has(field)) {
+          normalizedValue = Array.isArray(value) ? value : typeof value === 'string' ? [value] : []
+        }
+        // Update store
+        setFormData({ [field]: normalizedValue } as any)
+        // Transcript summary (no raw values)
+        setMessages(prev => [
+          ...prev,
+          {
+            id: `${Date.now()}-tool`,
+            role: 'tool',
+            content: `Updated fields: ${field}`,
+            timestamp: new Date(),
+            source: 'voice',
+          }
+        ])
+        return { success: true, updated_fields: [field] }
+      }
+      return { error: `Unhandled tool: ${toolName}` }
+    } catch (e: any) {
+      return { error: e?.message || 'Tool execution error' }
+    }
+  }, [setFormData])
+
   // Parse events from the Realtime data channel and surface transcripts + responses
   const handleRealtimeEvent = useCallback((raw: string) => {
     try {
       const evt = JSON.parse(raw)
       const type: string = evt?.type || ''
 
-      // Heuristic: detect when the model thinks / processes
-      if (type.includes('response') && type.includes('started')) {
+      // Response lifecycle
+      if (type === 'response.created') {
         setAgentState('processing')
-        // Create a placeholder assistant message
-        const id = evt?.response?.id || evt?.id || String(Date.now())
+        const id = evt?.response?.id || String(Date.now())
         responseBufferRef.current.set(id, '')
-        setMessages(prev => [...prev, { id, role: 'assistant', content: '', timestamp: new Date(), isProcessing: true }])
+        setMessages(prev => [...prev, { id, role: 'assistant', content: '', timestamp: new Date(), isProcessing: true, source: 'voice' }])
       }
 
-      // Streamed assistant text
-      if (type.includes('response.output_text.delta') && typeof evt?.delta === 'string') {
-        const id: string = evt?.response?.id || evt?.id || 'default'
+      if (type === 'response.output_text.delta' && typeof evt?.delta === 'string') {
+        const id: string = evt?.response?.id || 'default'
         const prev = responseBufferRef.current.get(id) || ''
         const next = prev + evt.delta
         responseBufferRef.current.set(id, next)
         setMessages(prev => prev.map(m => m.id === id ? { ...m, content: next } : m))
       }
 
-      // Assistant text done
-      if (type.includes('response.completed')) {
-        const id: string = evt?.response?.id || evt?.id || 'default'
-        const finalText = responseBufferRef.current.get(id) || ''
-        setMessages(prev => prev.map(m => m.id === id ? { ...m, content: finalText, isProcessing: false } : m))
-        responseBufferRef.current.delete(id)
-        setAgentState('idle')
+      if (type === 'response.output_text.done') {
+        // no-op here; finalization handled on response.done
       }
 
       // User transcript (partial)
-      if ((type.includes('transcript.delta') || type.includes('input_audio_transcription.delta')) && typeof evt?.delta === 'string') {
+      if ((type === 'input_audio_transcription.delta') && typeof evt?.delta === 'string') {
         setTranscript(prev => (prev + evt.delta).slice(-4000))
         latestUserTranscriptRef.current = (latestUserTranscriptRef.current + evt.delta).slice(-4000)
         setAgentState('listening')
       }
 
       // User transcript completed
-      if ((type.includes('transcript.completed') || type.includes('input_audio_transcription.completed'))) {
+      if ((type === 'input_audio_transcription.completed')) {
         const text: string = evt?.transcript || latestUserTranscriptRef.current
         if (text) {
-          const userMsg: Message = { id: String(Date.now()), role: 'user', content: text, timestamp: new Date() }
+          const userMsg: Message = { id: String(Date.now()), role: 'user', content: text, timestamp: new Date(), source: 'voice' }
           setMessages(prev => [...prev, userMsg])
         }
         latestUserTranscriptRef.current = ''
         setTranscript('')
-        // After user finishes talking, model may respond; keep state as processing/listening handled above
+      }
+
+      // Handle tool calls once the response is done (we can inspect output items)
+      if (type === 'response.done') {
+        const id: string = evt?.response?.id || 'default'
+        const finalText = responseBufferRef.current.get(id) || ''
+        setMessages(prev => prev.map(m => m.id === id ? { ...m, content: finalText, isProcessing: false } : m))
+        responseBufferRef.current.delete(id)
+        setAgentState('idle')
+
+        const outputItems: any[] = evt?.response?.output || []
+        const functionCalls = outputItems.filter((it: any) => it?.type === 'function_call')
+        if (functionCalls.length > 0) {
+          // Execute each tool, then return outputs
+          ;(async () => {
+            for (const fc of functionCalls) {
+              const name: string = fc?.name
+              const callId: string = fc?.call_id
+              let args: any = {}
+              try {
+                args = fc?.arguments ? JSON.parse(fc.arguments) : {}
+              } catch {
+                args = {}
+              }
+              const result = await executeToolCall(name, args)
+              sendToolResult(callId, result)
+            }
+          })()
+        }
       }
 
       // Optional: detect VAD events to update UI
-      if (type.includes('input_audio_buffer.speech_started')) {
+      if (type === 'input_audio_buffer.speech_started') {
         setAgentState('listening')
       }
-      if (type.includes('input_audio_buffer.speech_stopped')) {
+      if (type === 'input_audio_buffer.speech_stopped') {
         // Transition handled when response arrives
       }
     } catch (err) {
       // Some messages might be non-JSON; ignore gracefully
       // console.debug('Non-JSON realtime message', raw)
     }
-  }, [setMessages])
+  }, [setMessages, executeToolCall, sendToolResult])
 
   // Realtime API: Connect via WebRTC (no Agents SDK)
   const connectRealtime = useCallback(async () => {
@@ -469,7 +595,9 @@ export function VoiceAgent() {
                     'flex h-8 w-8 shrink-0 items-center justify-center rounded-full',
                     message.role === 'user'
                       ? 'bg-primary text-primary-foreground'
-                      : 'bg-muted'
+                      : message.role === 'tool'
+                        ? 'bg-amber-100 text-amber-900'
+                        : 'bg-muted'
                   )}
                 >
                   {message.role === 'user' ? (
@@ -483,7 +611,9 @@ export function VoiceAgent() {
                     'max-w-[85%] rounded-lg px-4 py-2',
                     message.role === 'user'
                       ? 'bg-primary text-primary-foreground'
-                      : 'bg-muted'
+                      : message.role === 'tool'
+                        ? 'bg-amber-50 text-amber-900 border border-amber-200'
+                        : 'bg-muted'
                   )}
                 >
                   {message.isProcessing ? (
