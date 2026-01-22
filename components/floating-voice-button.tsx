@@ -13,10 +13,12 @@ interface FloatingVoiceButtonProps {
   getText: () => string
   // Performs a search/replace and returns count of replacements
   replaceText: (find: string, replaceWith: string) => ReplaceResult
+  // When false, disable voice playback and request text-only responses (no audio streaming)
+  voicePlayback?: boolean
 }
 
 // Minimal realtime voice client with tool-calls for editing page text.
-export function FloatingVoiceButton({ getText, replaceText }: FloatingVoiceButtonProps) {
+export function FloatingVoiceButton({ getText, replaceText, voicePlayback = false }: FloatingVoiceButtonProps) {
   type AgentState = 'idle' | 'listening' | 'processing' | 'error'
 
   const [agentState, setAgentState] = useState<AgentState>('idle')
@@ -121,7 +123,8 @@ export function FloatingVoiceButton({ getText, replaceText }: FloatingVoiceButto
       const pc = new RTCPeerConnection()
       pcRef.current = pc
 
-      if (!remoteAudioRef.current) {
+      // Only create/play remote audio when voice playback is enabled
+      if (voicePlayback && !remoteAudioRef.current) {
         const el = document.createElement('audio')
         el.autoplay = true
         el.style.display = 'none'
@@ -129,8 +132,10 @@ export function FloatingVoiceButton({ getText, replaceText }: FloatingVoiceButto
         remoteAudioRef.current = el
       }
 
-      pc.ontrack = (e) => {
-        if (remoteAudioRef.current) remoteAudioRef.current.srcObject = e.streams[0]
+      if (voicePlayback) {
+        pc.ontrack = (e) => {
+          if (remoteAudioRef.current) remoteAudioRef.current.srcObject = e.streams[0]
+        }
       }
 
       const ms = await navigator.mediaDevices.getUserMedia({ audio: true })
@@ -152,7 +157,8 @@ export function FloatingVoiceButton({ getText, replaceText }: FloatingVoiceButto
         headers: {
           'Content-Type': 'application/sdp',
           'X-User-Language': languageCode,
-          'X-Session-Mode': 'writer'
+          'X-Session-Mode': 'writer',
+          'X-Output-Modalities': voicePlayback ? 'audio' : 'text'
         },
         body: offer.sdp || ''
       })
@@ -170,6 +176,10 @@ export function FloatingVoiceButton({ getText, replaceText }: FloatingVoiceButto
 
       // Provide a short system note so the model knows there is editable text
       const preview = getText().slice(0, 400)
+      const guidance = voicePlayback
+        ? 'Speak your responses naturally.'
+        : 'Do not speak aloud. Prefer calling tools. Keep any textual replies extremely brief.'
+
       sendRealtimeEvent({
         type: 'conversation.item.create',
         item: {
@@ -177,7 +187,8 @@ export function FloatingVoiceButton({ getText, replaceText }: FloatingVoiceButto
           role: 'system',
           content: [
             { type: 'input_text', text: 'You can edit the on-page document using replace_text. Ask clarifying questions when needed.' },
-            { type: 'input_text', text: `Document preview (first 400 chars):\n${preview}` }
+            { type: 'input_text', text: `Document preview (first 400 chars):\n${preview}` },
+            { type: 'input_text', text: guidance }
           ]
         }
       })
@@ -191,7 +202,7 @@ export function FloatingVoiceButton({ getText, replaceText }: FloatingVoiceButto
     } finally {
       setIsConnecting(false)
     }
-  }, [getText, handleRealtimeEvent, isRealtimeConnected, isConnecting, sendRealtimeEvent])
+  }, [getText, handleRealtimeEvent, isRealtimeConnected, isConnecting, sendRealtimeEvent, voicePlayback])
 
   const disconnect = useCallback(() => {
     try { pcRef.current?.close() } catch {}
