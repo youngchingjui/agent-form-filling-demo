@@ -10,15 +10,16 @@ export async function POST(req: Request) {
       return new Response('Missing SDP in request body', { status: 400 })
     }
 
-    // Get user's language from header
+    // Get user's language and session mode from headers
     const userLanguage = req.headers.get('X-User-Language') || 'en'
+    const sessionMode = (req.headers.get('X-Session-Mode') || 'certification').toLowerCase()
 
     const model = process.env.OPENAI_REALTIME_MODEL || 'gpt-realtime'
     const voice = process.env.OPENAI_REALTIME_VOICE || 'coral'
 
     // Tools exposed to the Realtime model. The client will execute these and
     // return function_call_output events with results.
-    const tools = [
+    const formTools = [
       {
         type: 'function',
         name: 'update_form_field',
@@ -68,9 +69,33 @@ export async function POST(req: Request) {
           }
         }
       }
-    ]
+    ] as const
 
-    const toolAwareInstructions = `You are a helpful AI assistant specializing in product certification.
+    const writerTools = [
+      {
+        type: 'function',
+        name: 'get_document_text',
+        description:
+          'Returns the full plaintext content of the current page document. Use before editing so you can decide what to change.',
+        parameters: { type: 'object', properties: {} }
+      },
+      {
+        type: 'function',
+        name: 'replace_text',
+        description:
+          'Search for a snippet of text in the document and replace it with new text. Keep snippets short but unique. If the snippet is ambiguous, ask the user to clarify.',
+        parameters: {
+          type: 'object',
+          properties: {
+            find: { type: 'string', description: 'Exact snippet to find (case-sensitive). Use a short, unique phrase from the document.' },
+            replace: { type: 'string', description: 'Replacement text.' }
+          },
+          required: ['find', 'replace']
+        }
+      }
+    ] as const
+
+    const certificationInstructions = `You are a helpful AI assistant specializing in product certification.
 
 Follow these tool-calling rules strictly:
 - Access & context: You may read the latest form data and schema at any time via tools.
@@ -79,11 +104,20 @@ Follow these tool-calling rules strictly:
 - Conflicts: If the user likely changed the UI meanwhile, refresh the latest data and ask which value to keep.
 - Observability: Summarize field names you updated; do not reveal raw sensitive values in your spoken/text response.`
 
+    const writerInstructions = `You are a concise writing assistant that edits the visible page text in real time.
+
+Tools:
+- Use get_document_text to read the current content when needed.
+- Use replace_text to make precise edits. Choose short, unique snippets to avoid unintended changes.
+- Ask brief clarifying questions if a requested edit is ambiguous or the snippet is not found.`
+
+    const isWriter = sessionMode === 'writer' || sessionMode === 'slash'
+
     const sessionConfig = JSON.stringify({
       type: 'realtime',
       model,
       audio: { output: { voice } },
-      instructions: `${toolAwareInstructions}
+      instructions: `${isWriter ? writerInstructions : certificationInstructions}
 
 CRITICAL LANGUAGE RULE: The user's browser detected language is "${userLanguage}". You MUST respond in ${userLanguage} at all times.
 - If the user speaks in ${userLanguage}, respond in ${userLanguage}.
@@ -91,7 +125,7 @@ CRITICAL LANGUAGE RULE: The user's browser detected language is "${userLanguage}
 - NEVER respond in a different language than what the user is currently speaking.
 - Always match the user's language exactly.`,
       tool_choice: 'auto',
-      tools
+      tools: isWriter ? writerTools : formTools
     })
 
     const fd = new FormData()
