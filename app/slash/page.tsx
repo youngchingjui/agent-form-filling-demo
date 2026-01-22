@@ -1,4 +1,4 @@
-'use client'
+"use client"
 
 import React, { useEffect, useMemo, useRef, useState } from 'react'
 import { FloatingVoiceButton } from '@/components/floating-voice-button'
@@ -62,8 +62,14 @@ export default function SlashPage() {
       }
 
       const changedLineIdxs = new Set<number>()
+      const newlineCountInFind = find.split('\n').length - 1
       for (const idx of indices) {
-        changedLineIdxs.add(toLineIndex(idx))
+        const startLine = toLineIndex(idx)
+        changedLineIdxs.add(startLine)
+        // If the snippet spans multiple lines, highlight the subsequent lines, too
+        for (let n = 1; n <= newlineCountInFind; n++) {
+          changedLineIdxs.add(startLine + n)
+        }
       }
 
       setText(replaced)
