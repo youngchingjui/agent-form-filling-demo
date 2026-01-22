@@ -14,6 +14,10 @@ export async function POST(req: Request) {
     const userLanguage = req.headers.get('X-User-Language') || 'en'
     const sessionMode = (req.headers.get('X-Session-Mode') || 'certification').toLowerCase()
 
+    // Output modalities: "audio" (default) or "text" only. When "text", we do not request audio output
+    const outputHeader = (req.headers.get('X-Output-Modalities') || 'audio').toLowerCase()
+    const outputTextOnly = outputHeader === 'text'
+
     const model = process.env.OPENAI_REALTIME_MODEL || 'gpt-realtime'
     const voice = process.env.OPENAI_REALTIME_VOICE || 'coral'
 
@@ -113,20 +117,35 @@ Tools:
 
     const isWriter = sessionMode === 'writer' || sessionMode === 'slash'
 
-    const sessionConfig = JSON.stringify({
-      type: 'realtime',
-      model,
-      audio: { output: { voice } },
-      instructions: `${isWriter ? writerInstructions : certificationInstructions}
+    // Build instructions with language and voice/text guidance
+    const guidance = outputTextOnly
+      ? `\nSYSTEM: Do not produce audio output. Keep textual responses minimal and prefer calling tools when possible. Only speak (text) when necessary to confirm or ask a clarifying question.`
+      : ''
+
+    const instructions = `${isWriter ? writerInstructions : certificationInstructions}${guidance}
 
 CRITICAL LANGUAGE RULE: The user's browser detected language is "${userLanguage}". You MUST respond in ${userLanguage} at all times.
 - If the user speaks in ${userLanguage}, respond in ${userLanguage}.
 - If the user switches to another language, respond in that same language.
 - NEVER respond in a different language than what the user is currently speaking.
-- Always match the user's language exactly.`,
+- Always match the user's language exactly.`
+
+    // Construct session config. When text-only, omit audio output and explicitly set output_modalities to ["text"].
+    const sessionObj: any = {
+      type: 'realtime',
+      model,
+      instructions,
       tool_choice: 'auto',
       tools: isWriter ? writerTools : formTools
-    })
+    }
+
+    if (outputTextOnly) {
+      sessionObj.output_modalities = ['text']
+    } else {
+      sessionObj.audio = { output: { voice } }
+    }
+
+    const sessionConfig = JSON.stringify(sessionObj)
 
     const fd = new FormData()
     fd.set('sdp', sdpOffer)
