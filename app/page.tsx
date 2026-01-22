@@ -1,6 +1,7 @@
 'use client'
 
 import { useState } from 'react'
+import Link from 'next/link'
 import { CertificationForm } from '@/components/certification-form'
 import { VoiceAgent } from '@/components/voice-agent'
 import { Button } from '@/components/ui/button'
@@ -42,6 +43,14 @@ function Header() {
           >
             {status.overall.percentage}% Complete
           </Badge>
+
+          {/* Navigation to Slash page (desktop) */}
+          <Button asChild variant="outline" size="sm" className="hidden md:inline-flex">
+            <Link href="/slash">
+              Open Slash Page
+              <ArrowRight className="ml-1 h-4 w-4" />
+            </Link>
+          </Button>
           
           {/* Mobile voice agent trigger */}
           <Sheet>
@@ -55,6 +64,14 @@ function Header() {
               <VoiceAgent />
             </SheetContent>
           </Sheet>
+
+          {/* Navigation to Slash page (mobile) */}
+          <Button asChild variant="ghost" size="sm" className="md:hidden">
+            <Link href="/slash">
+              Slash
+              <ArrowRight className="ml-1 h-4 w-4" />
+            </Link>
+          </Button>
         </div>
       </div>
     </header>
@@ -224,3 +241,4 @@ export default function Home() {
     </div>
   )
 }
+
