@@ -8,17 +8,27 @@ import { cn } from '@/lib/utils'
 
 export type ReplaceResult = { success: boolean; replacedCount?: number; error?: string }
 
+interface DiagramTools {
+  getDiagram: () => any
+  addNode?: (label: string) => { success: boolean; id?: string; error?: string }
+  connectNodes?: (fromLabel: string, toLabel: string) => { success: boolean; error?: string }
+  renameNode?: (oldLabel: string, newLabel: string) => { success: boolean; error?: string }
+  deleteNode?: (label: string) => { success: boolean; error?: string }
+}
+
 interface FloatingVoiceButtonProps {
   // Returns the full plaintext document
   getText: () => string
   // Performs a search/replace and returns count of replacements
   replaceText: (find: string, replaceWith: string) => ReplaceResult
+  // Optional diagram tools exposed to the agent
+  diagramTools?: DiagramTools
   // When false, disable voice playback and request text-only responses (no audio streaming)
   voicePlayback?: boolean
 }
 
-// Minimal realtime voice client with tool-calls for editing page text.
-export function FloatingVoiceButton({ getText, replaceText, voicePlayback = false }: FloatingVoiceButtonProps) {
+// Minimal realtime voice client with tool-calls for editing page text and (optionally) a diagram.
+export function FloatingVoiceButton({ getText, replaceText, diagramTools, voicePlayback = false }: FloatingVoiceButtonProps) {
   type AgentState = 'idle' | 'listening' | 'processing' | 'error'
 
   const [agentState, setAgentState] = useState<AgentState>('idle')
@@ -68,6 +78,41 @@ export function FloatingVoiceButton({ getText, replaceText, voicePlayback = fals
         }
         return res
       }
+      if (toolName === 'get_diagram' && diagramTools?.getDiagram) {
+        const d = diagramTools.getDiagram()
+        toast.info('Tool used: get_diagram')
+        return { diagram: d }
+      }
+      if (toolName === 'add_node' && diagramTools?.addNode) {
+        const label = String(args?.label || '')
+        const res = diagramTools.addNode(label)
+        if (!res.success) toast.error(res.error || 'add_node failed')
+        else toast.success(`Added node: ${label}`)
+        return res
+      }
+      if (toolName === 'connect_nodes' && diagramTools?.connectNodes) {
+        const from = String(args?.from || '')
+        const to = String(args?.to || '')
+        const res = diagramTools.connectNodes(from, to)
+        if (!res.success) toast.error(res.error || 'connect_nodes failed')
+        else toast.success(`Connected ${from} → ${to}`)
+        return res
+      }
+      if (toolName === 'rename_node' && diagramTools?.renameNode) {
+        const oldLabel = String(args?.old_label || '')
+        const newLabel = String(args?.new_label || '')
+        const res = diagramTools.renameNode(oldLabel, newLabel)
+        if (!res.success) toast.error(res.error || 'rename_node failed')
+        else toast.success(`Renamed ${oldLabel} → ${newLabel}`)
+        return res
+      }
+      if (toolName === 'delete_node' && diagramTools?.deleteNode) {
+        const label = String(args?.label || '')
+        const res = diagramTools.deleteNode(label)
+        if (!res.success) toast.error(res.error || 'delete_node failed')
+        else toast.success(`Deleted ${label}`)
+        return res
+      }
       // Unknown tool
       toast.warning(`Unknown tool: ${toolName}`)
       return { error: `Unhandled tool: ${toolName}` }
@@ -76,7 +121,7 @@ export function FloatingVoiceButton({ getText, replaceText, voicePlayback = fals
       toast.error(msg)
       return { error: msg }
     }
-  }, [getText, replaceText])
+  }, [getText, replaceText, diagramTools])
 
   const handleRealtimeEvent = useCallback((raw: string) => {
     try {
@@ -174,22 +219,32 @@ export function FloatingVoiceButton({ getText, replaceText, voicePlayback = fals
       setIsRealtimeConnected(true)
       setAgentState('idle')
 
-      // Provide a short system note so the model knows there is editable text
+      // Provide a short system note so the model knows there is editable text and diagram (if present)
       const preview = getText().slice(0, 400)
       const guidance = voicePlayback
         ? 'Speak your responses naturally.'
         : 'Do not speak aloud. Prefer calling tools. Keep any textual replies extremely brief.'
+
+      const items: any[] = [
+        { type: 'input_text', text: 'You can edit the on-page document using replace_text. Ask clarifying questions when needed.' },
+        { type: 'input_text', text: `Document preview (first 400 chars):\n${preview}` },
+      ]
+
+      if (diagramTools?.getDiagram) {
+        const d = diagramTools.getDiagram()
+        const nodeList = Array.isArray(d?.nodes) ? d.nodes.map((n: any) => n.label).join(', ') : ''
+        items.push({ type: 'input_text', text: 'You can also edit a diagram using these tools: get_diagram, add_node(label), connect_nodes(from, to), rename_node(old_label, new_label), delete_node(label).' })
+        items.push({ type: 'input_text', text: `Current diagram nodes: ${nodeList}` })
+      }
+
+      items.push({ type: 'input_text', text: guidance })
 
       sendRealtimeEvent({
         type: 'conversation.item.create',
         item: {
           type: 'message',
           role: 'system',
-          content: [
-            { type: 'input_text', text: 'You can edit the on-page document using replace_text. Ask clarifying questions when needed.' },
-            { type: 'input_text', text: `Document preview (first 400 chars):\n${preview}` },
-            { type: 'input_text', text: guidance }
-          ]
+          content: items
         }
       })
       sendRealtimeEvent({ type: 'response.create' })
@@ -202,7 +257,7 @@ export function FloatingVoiceButton({ getText, replaceText, voicePlayback = fals
     } finally {
       setIsConnecting(false)
     }
-  }, [getText, handleRealtimeEvent, isRealtimeConnected, isConnecting, sendRealtimeEvent, voicePlayback])
+  }, [getText, handleRealtimeEvent, isRealtimeConnected, isConnecting, sendRealtimeEvent, voicePlayback, diagramTools])
 
   const disconnect = useCallback(() => {
     try { pcRef.current?.close() } catch {}
